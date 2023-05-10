@@ -1,8 +1,8 @@
 {
   "files": {
     "main.css": "https://nguyen-tri-nhan.github.io/static/css/main.6f5fbccf.chunk.css",
-    "main.js": "https://nguyen-tri-nhan.github.io/static/js/main.bc44edb4.chunk.js",
-    "main.js.map": "https://nguyen-tri-nhan.github.io/static/js/main.bc44edb4.chunk.js.map",
+    "main.js": "https://nguyen-tri-nhan.github.io/static/js/main.d60a4377.chunk.js",
+    "main.js.map": "https://nguyen-tri-nhan.github.io/static/js/main.d60a4377.chunk.js.map",
     "runtime-main.js": "https://nguyen-tri-nhan.github.io/static/js/runtime-main.ae3486f3.js",
     "runtime-main.js.map": "https://nguyen-tri-nhan.github.io/static/js/runtime-main.ae3486f3.js.map",
     "static/js/2.88f6e73d.chunk.js": "https://nguyen-tri-nhan.github.io/static/js/2.88f6e73d.chunk.js",
@@ -29,6 +29,6 @@
     "static/js/runtime-main.ae3486f3.js",
     "static/js/2.88f6e73d.chunk.js",
     "static/css/main.6f5fbccf.chunk.css",
-    "static/js/main.bc44edb4.chunk.js"
+    "static/js/main.d60a4377.chunk.js"
   ]
 }
