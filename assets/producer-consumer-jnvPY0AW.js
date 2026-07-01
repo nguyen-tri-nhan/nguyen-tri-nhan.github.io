@@ -1,0 +1,125 @@
+const e=`---
+key: "Producer & Consumer"
+title: "Kafka Producer & Consumer"
+crumb: "6. Messaging › Kafka"
+---
+
+Producer publish message lên Kafka topic; Consumer đọc message và commit offset để theo dõi tiến trình — với delivery guarantee có thể cấu hình ở cả hai phía.
+
+## Điểm Chính
+
+- Producer acks: <code>acks=0</code> (fire-and-forget), <code>acks=1</code> (leader xác nhận), <code>acks=all</code> (tất cả ISR xác nhận — mạnh nhất).
+- <code>enable.idempotence=true</code>: ngăn message trùng lặp từ retry (exactly-once ở phía producer).
+- Consumer: <code>auto.offset.reset=earliest</code> (đọc từ đầu) hoặc <code>latest</code> (chỉ đọc message mới).
+- Chiến lược commit: auto-commit (đơn giản, rủi ro at-least-once) vs manual commit (sau xử lý, đảm bảo mạnh hơn).
+- Deserialization: <code>ErrorHandlingDeserializer</code> bọc deserializer để xử lý poison pill.
+
+## Ví Dụ Code
+
+*Producer acks=all + idempotence config; manual-ack consumer; poison pill handling*
+
+\`\`\`java
+// Producer config: acks=all + idempotence → no message loss, no duplicates on retry
+// application.yml
+spring:
+  kafka:
+    bootstrap-servers: \${spring.kafka.bootstrap-servers:localhost:9092}
+    producer:
+      acks: all                   # wait for all ISR replicas to confirm
+      retries: 3                  # retry on transient error
+      enable-idempotence: true    # exactly-once at producer level (dedup by seq no.)
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      auto-offset-reset: earliest
+      enable-auto-commit: false   # manual commit — we control when offset moves
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.example.events"
+    listener:
+      ack-mode: manual            # ack only after successful processing
+
+// Producer: publish payment-events with error handling
+@Service
+@RequiredArgsConstructor
+public class PaymentEventPublisher {
+    private final KafkaTemplate<String, Object> kafkaTemplate;
+
+    public void publishPaymentProcessed(PaymentProcessedEvent event) {
+        kafkaTemplate.send("payment-events", event.getOrderId(), event)
+            .whenComplete((result, ex) -> {
+                if (ex != null) {
+                    log.error("publish failed: orderId={}", event.getOrderId(), ex);
+                } else {
+                    log.info("payment-events sent: orderId={} offset={}",
+                        event.getOrderId(), result.getRecordMetadata().offset());
+                }
+            });
+    }
+}
+
+// Consumer: manual ack pattern — commit only after business logic succeeds
+@KafkaListener(topics = "payment-events", groupId = "order-service")
+public void onPaymentProcessed(PaymentProcessedEvent event, Acknowledgment ack) {
+    orderService.markPaid(event.getOrderId(), event.getAmount()); // business logic
+    ack.acknowledge(); // commit offset: if we crash here, we reprocess (at-least-once)
+}
+
+// Poison pill handling: wrap deserializer to route bad messages to DLQ
+// spring.kafka.consumer.value-deserializer: ErrorHandlingDeserializer
+// spring.kafka.consumer.properties.spring.deserializer.value.delegate.class: JsonDeserializer
+\`\`\`
+
+## Ứng Dụng Thực Tế
+
+Bật <code>enable.idempotence=true</code> và <code>acks=all</code> trên producer trong production. Dùng manual commit trên consumer và commit SAU khi xử lý để đảm bảo at-least-once delivery. Thêm error handling với retry + DLQ cho poison pill.
+
+## Câu Hỏi Phỏng Vấn
+
+<details>
+<summary><strong>BlockingQueue giải quyết bài toán producer-consumer thế nào?</strong></summary>
+
+**A:** \`BlockingQueue\` là thread-safe queue với blocking operations: \`put()\` block nếu queue full (chờ consumer lấy đi), \`take()\` block nếu queue empty (chờ producer thêm vào). Tự động handle synchronization, wait/notify — không cần code thủ công. Ví dụ:
+\`\`\`java
+BlockingQueue<Task> queue = new LinkedBlockingQueue<>(100);
+// Producer: queue.put(task); // block if full
+// Consumer: Task t = queue.take(); // block if empty
+\`\`\`
+\`ArrayBlockingQueue\`: bounded, fair option. \`LinkedBlockingQueue\`: optionally bounded. \`SynchronousQueue\`: capacity=0, transfer trực tiếp từ producer sang consumer.
+
+</details>
+
+<details>
+<summary><strong>Sự khác biệt giữa LinkedBlockingQueue và ArrayBlockingQueue?</strong></summary>
+
+**A:** **\`LinkedBlockingQueue\`**: linked list structure, optionally bounded (default \`Integer.MAX_VALUE\` — effectively unbounded), hai lock riêng biệt cho put và take → higher throughput khi concurrent producer và consumer. **\`ArrayBlockingQueue\`**: array structure, **bounded** (phải specify capacity khi tạo), một lock cho cả put và take → lower throughput nhưng predictable memory. Fair ordering option trong ArrayBlockingQueue (FIFO per thread). Chọn: LinkedBlockingQueue khi throughput quan trọng; ArrayBlockingQueue khi muốn strict bound và fair ordering.
+
+</details>
+
+<details>
+<summary><strong>Làm thế nào để gracefully stop consumer thread?</strong></summary>
+
+**A:** Pattern phổ biến: **poison pill** — producer put sentinel value đặc biệt vào queue khi muốn shutdown. Consumer kiểm tra: \`if (task == POISON_PILL) break;\`. Multiple consumers: put N poison pills (một per consumer). Alternative: dùng \`ExecutorService.shutdown()\` + \`awaitTermination()\` — nhưng cần consumer check \`Thread.currentThread().isInterrupted()\`. Với \`BlockingQueue.poll(timeout)\` thay vì \`take()\` → consumer có thể check interrupted flag định kỳ. Best practice: combine poison pill + interrupt handling để robust shutdown.
+
+</details>
+
+## Sơ Đồ Kafka Producer & Consumer Internals
+
+\`\`\`mermaid
+flowchart TB
+    subgraph Producer["Kafka Producer"]
+        Rec["ProducerRecord\\ntopic, key, value"] --> Ser["Serializer\\n(key + value → bytes)"]
+        Ser --> Part["Partitioner\\nhash(key) % numPartitions"]
+        Part --> Buf["RecordAccumulator\\n(batch buffer per partition)"]
+        Buf -->|"linger.ms OR batch.size full"| Net["NetworkClient → Broker"]
+    end
+
+    subgraph Consumer["Kafka Consumer"]
+        Poll["consumer.poll(Duration)"] --> Fetch["Fetch from broker\\n(assigned partitions)"]
+        Fetch --> Deser["Deserializer\\nbytes → object"]
+        Deser --> Process["Process records"]
+        Process --> Commit["commitSync() / commitAsync()\\nadvance offset in __consumer_offsets"]
+    end
+\`\`\`
+`;export{e as default};
